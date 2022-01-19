@@ -1,0 +1,291 @@
+---
+title: "MovieLens Project - Recommendation System"
+output: pdf_document
+---
+
+## EXECUTIVE SUMMARY
+
+This project constists in the creation of a Recommendation System using a sample from the publicly available MovieLense dataset included in the dslabs package. 
+The final goal is to predict the rating that a user would give to a given movie.
+The sample consist of a set with 7 columns and 9M rows. Each row contains the rating of a movie by a given user, plus the title and genre of that movie.
+The process consisted in 4 steps:
+
+1) Understanding of the data
+2) Splitting the data set into test and train sets
+3) Training and testing models
+4) Final validation of the selected model in a separated set
+
+The final model was created by applying Matrix Factorization using the "recosystem" library 
+
+
+Creation of the datasets. Code provided by edx:
+```{r dataset, echo=FALSE}
+########################################################################
+# Create edx set, validation set 
+# Code provided by edx
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(recosystem)
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding") # if using R 3.5 or earlier, use `set.seed(1)`
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+
+## ANALYSIS
+
+1) Understanding the data
+
+The first step is to quickly see what data and variables we have available
+```{r edx, echo=FALSE}
+head(edx)
+```
+We know that we have several features to try to predict the rating:
+userID, MovieID, Title, Timestamp and Genre.
+
+We want to see how strong is the user and movie effect on the ratings.
+
+
+```{r user, echo=FALSE}
+edx %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating)) %>% 
+  filter(n()>=100) %>%
+  ggplot(aes(b_u)) + 
+  geom_histogram(bins = 30, color = "black")+
+  ggtitle("User effect")
+
+edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating)) %>% 
+  filter(n()>=100) %>%
+  ggplot(aes(b_i)) + 
+  geom_histogram(bins = 30, color = "black")+
+  ggtitle("Movie Effect")
+```
+
+We see that the user and movie effects are strong, and must be taken into consideration when building the model.
+
+
+2) Splitting the data set into test and train sets
+
+We will split the edx set into train set (20% of the edx set) and test set (80% of the edx set).
+Each model will used only these two datasets. The final model will be tested in the validation set created using the code provided by edx.
+
+```{r splitset, echo=FALSE}
+library(caret)
+set.seed(755)
+test_index <- createDataPartition(y = edx$rating, times = 1,
+                                  p = 0.2, list = FALSE)
+train_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+#To make sure we don't include users and movies in the test set that do not
+#appear in the training set, we removed these using the semi_join function
+test_set <- test_set %>% 
+  semi_join(train_set, by = "movieId") %>%
+  semi_join(train_set, by = "userId")
+
+```
+To compare different models or to see how well we're doing compared to some baseline, we need to quantify what it means to do well.
+
+We build a function that computes this residual means squared error for a vector of ratings and their corresponding predictors
+
+```{r rmsefun, echo=FALSE}
+RMSE <- function(true_ratings, predicted_ratings){
+  sqrt(mean((true_ratings - predicted_ratings)^2))
+}
+```
+We will be comparing different approaches,
+We're going to create a table that's going to store the results that we obtain.
+```{r rmseset, echo=FALSE}
+mu_hat <- mean(train_set$rating)
+
+naive_rmse <- RMSE(test_set$rating, mu_hat)
+
+predictions <- rep(2.5, nrow(test_set))
+RMSE(test_set$rating, predictions)
+
+rmse_results <- tibble(method = "Just the average", RMSE = naive_rmse)
+```
+
+
+3) Training and testing models
+
+We will use the methods used during the course, in which users and movies effects are taking into account for rating prediciton.
+
+```{r model 1, echo=FALSE}
+#Adding the movie effect
+mu <- mean(train_set$rating) 
+movie_avgs <- train_set %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - mu))
+
+predicted_ratings <- mu + test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  .$b_i
+
+model_1_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie Effect Model",
+                                     RMSE = model_1_rmse ))
+
+#Adding user effect
+user_avgs <- train_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_i))
+
+predicted_ratings <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  .$pred
+
+model_2_rmse <- RMSE(predicted_ratings, test_set$rating)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Movie + User Effects Model",  
+                                     RMSE = model_2_rmse ))
+rmse_results
+```
+The RMSE represents the error of our prediction. Using just the average, a prediction could "fail" by 1.06 points in the rating, which is very large.
+
+By taking into account the user effect, this error decreases to .94, and when adding both user and movie effect it goes down to 0.866.
+
+An additional method is to consider the size of the samples. This means that the variability is contrained by penalizing predictions that are estimated using small sample sizes.
+As we do not know how much to "penalize" the samples, we run a test with different values to find the optimal one, in which the rmse is minimized.
+
+```{r regularization, echo=FALSE}
+lambdas <- seq(0, 10, 0.25)
+rmses <- sapply(lambdas, function(l){
+  mu <- mean(train_set$rating)
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarize(b_i = sum(rating - mu)/(n()+l))
+  b_u <- train_set %>% 
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarize(b_u = sum(rating - b_i - mu)/(n()+l))
+  predicted_ratings <- 
+    test_set %>% 
+    left_join(b_i, by = "movieId") %>%
+    left_join(b_u, by = "userId") %>%
+    mutate(pred = mu + b_i + b_u,digits = 1) %>%
+    .$pred
+  return(RMSE(predicted_ratings, test_set$rating))
+})
+qplot(lambdas, rmses)
+
+```
+
+We see that the rmse is minimized at 4.75 value of lambda, being lambda de factor that penalizes the sample sizes.
+
+We see that the RMSE decreases even more down to 0.865.
+```{r rmsereg, echo=FALSE}
+lambda <- lambdas[which.min(rmses)]
+
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Regularized Movie + User Effect Model",  
+                                     RMSE = min(rmses)))
+rmse_results %>% knitr::kable()
+```
+
+Finally, we will try Matrix Factorization method.
+
+There are "hidden" features more than the user and movie effect. 
+Some users might like some time of movies because of many reasons: actors, genre, lenght, year, etc.
+We cannot get this only by looking at userid and movieid columns.
+
+The Matrix Factorization method will allow us to create features that explain the variability.
+In this method, there are 2 main parameters that we can define: 
+the number of factors and the number of iterations.
+Due to the heavy load of work for a home PC, I manually tested 3 different values of each and selected the optimal one. This resulted in 50 factors and 500 iterations.
+
+
+
+```{r Matrix, echo=FALSE}
+train_data <- data_memory(user_index=train_set$userId, item_index=train_set$movieId, 
+                         rating=train_set$rating, index1 = T)
+
+test_data <- data_memory(user_index=test_set$userId, item_index=test_set$movieId, 
+                       rating=test_set$rating, index1 = T)
+recommender <- Reco()
+recommender$train(train_data, opts = c(dim = 50, costp_11=0.1, costq_11=0.1,
+                                       lrate=0.1, niter=500, nthread=6, verbose=F))
+
+test_set$prediction <- recommender$predict(test_data, out_memory())
+
+model_recosystem <- RMSE(test_set$rating, test_set$prediction)
+rmse_results <- bind_rows(rmse_results,
+                          data_frame(method="Matrix Factorization 50 dim",
+                                     RMSE = model_recosystem ))
+rmse_results
+```
+
+Using this method, the RMSE goes down to 0.809, the lowest of them all.
+
+## RESULTS
+
+Here, we will see the final result of our model in the Validation set, which has not been used in any previous analysis. 
+
+4) Final validation of the selected model in a separated set
+
+We selected the Matrix Factorization method as the optimal one.
+Now we must use this in the Validation set, to see how well it performs in new data.
+
+The RMSE in this dataset is:
+```{r validation, echo=FALSE}
+validation_data <- data_memory(user_index=validation$userId, item_index=validation$movieId, 
+                         rating=validation$rating, index1 = T)
+
+validation$prediction <- recommender$predict(validation_data, out_memory())
+
+RMSE(validation$rating, validation$prediction)
+```
+
+We can see how the RMSE is still below 0.81 even in the validation set.
+
+This means that the model is correct and reaches the goal of an RMSE below 0.8649
+
+
+## CONSLUSIONS
+
+From the results of the different methods we can determine that Matrix Factorization is a powerful method useful when the data can have many features that explain the variability of the searched values.
+
+As the existing variables in the dataset do not capture the whole variability (user id, movie id), it is necessary to use this method that allows us to ucapture patterns as factors to predict the searched values.
+
